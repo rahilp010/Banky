@@ -1,8 +1,7 @@
 /* eslint-disable react-native/no-inline-styles */
 /* eslint-disable prettier/prettier */
-import React, {useEffect, useMemo, useRef, useState} from 'react';
+import React, {useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {
-  Alert,
   Modal,
   Platform,
   Pressable,
@@ -11,7 +10,6 @@ import {
   StyleSheet,
   Text,
   TextInput,
-  ToastAndroid,
   View,
   KeyboardAvoidingView,
 } from 'react-native';
@@ -40,7 +38,9 @@ import {
   clearTransactions,
   closeDatabase,
   getDashboardSummary,
+  getMonthlyBudget,
   getTransactions,
+  setMonthlyBudget as saveMonthlyBudget,
 } from '../Components/db';
 import {version} from '../package.json';
 import {useNotification} from '../Components/NotificationContext';
@@ -54,7 +54,7 @@ const transactionOptions = [
   {name: 'Other', type: 'other', icon: 'category', accent: '#FCA5A5'},
 ];
 
-const creditTransactionTypes = ['income', 'salary'];
+const expenseTransactionTypes = ['petrol', 'food', 'other'];
 
 const notificationOptions = {
   enableVibrateFallback: true,
@@ -73,13 +73,21 @@ const formatDate = value =>
     year: 'numeric',
   });
 
+const getMonthKey = value => {
+  const date = new Date(value);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+};
+
 const HomeScreen = () => {
   const navigation = useNavigation();
   const {showNotification} = useNotification();
 
-  const showMessage = (message, type = 'info', title = 'Banky') => {
-    showNotification({title, message, type});
-  };
+  const showMessage = useCallback(
+    (message, type = 'info', title = 'Banky') => {
+      showNotification({title, message, type});
+    },
+    [showNotification],
+  );
 
   const [summary, setSummary] = useState({
     balance: 0,
@@ -92,6 +100,9 @@ const HomeScreen = () => {
   const [allTransactions, setAllTransactions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
+  const [budgetVisible, setBudgetVisible] = useState(false);
+  const [budgetInput, setBudgetInput] = useState('');
+  const [monthlyBudget, setMonthlyBudget] = useState(0);
   const [resetVisible, setResetVisible] = useState(false);
   const {isDarkMode, toggleTheme, colors} = useTheme();
   const [selectedItem, setSelectedItem] = useState(transactionOptions[0]);
@@ -134,35 +145,40 @@ const HomeScreen = () => {
     toggleTheme();
   };
 
-  const loadDashboard = async () => {
+  const loadDashboard = useCallback(async () => {
     try {
       setLoading(true);
-      const [dashboard, recent, transactions] = await Promise.all([
+      const [dashboard, recent, transactions, budget] = await Promise.all([
         getDashboardSummary(),
         getTransactions({limit: 5}),
         getTransactions(),
+        getMonthlyBudget(getMonthKey(selectedReportMonth)),
       ]);
 
       setSummary(dashboard);
       setRecentTransactions(recent);
       setAllTransactions(transactions);
+      setMonthlyBudget(budget);
     } catch (error) {
       console.log('Dashboard load error:', error);
       showMessage('Unable to refresh your dashboard.', 'error', 'Oops!');
     } finally {
       setLoading(false);
     }
-  };
+  }, [selectedReportMonth, showMessage]);
 
   useEffect(() => {
     loadDashboard();
+  }, [loadDashboard]);
+
+  useEffect(() => {
     BootSplash.hide({fade: true}).catch(() => {});
   }, []);
 
   useEffect(() => {
     const unsubscribe = navigation.addListener('focus', loadDashboard);
     return unsubscribe;
-  }, [navigation]);
+  }, [navigation, loadDashboard]);
 
   const monthOptions = useMemo(() => {
     const options = [];
@@ -206,12 +222,12 @@ const HomeScreen = () => {
       return accumulator;
     }, {});
 
-    const totalAmount = Object.entries(categories).reduce(
-      (runningTotal, [type, amount]) =>
-        runningTotal +
-        (creditTransactionTypes.includes(type)
-          ? Number(amount) || 0
-          : -(Number(amount) || 0)),
+    const income = ['income', 'salary'].reduce(
+      (total, type) => total + categories[type],
+      0,
+    );
+    const expenses = expenseTransactionTypes.reduce(
+      (total, type) => total + categories[type],
       0,
     );
 
@@ -221,17 +237,33 @@ const HomeScreen = () => {
         const itemDate = new Date(item.date);
         return (
           itemDate.toDateString() === now.toDateString() &&
-          ['petrol', 'food', 'other'].includes(item.type)
+          expenseTransactionTypes.includes(item.type)
         );
       })
       .reduce((total, item) => total + Number(item.amount), 0);
 
     return {
       categories,
-      totalAmount,
+      income,
+      expenses,
+      savings: categories.savings,
+      totalAmount: expenses,
       spentToday,
     };
   }, [allTransactions, selectedReportMonth]);
+
+  const statItems = [
+    {label: 'Income', value: reportData.income, color: '#22C55E'},
+    {label: 'Expenses', value: reportData.expenses, color: '#F97316'},
+    {label: 'Savings', value: reportData.savings, color: '#8B5CF6'},
+  ];
+
+  const budgetProgress =
+    monthlyBudget > 0
+      ? Math.min(reportData.expenses / monthlyBudget, 1)
+      : 0;
+  const budgetRemaining = Math.max(monthlyBudget - reportData.expenses, 0);
+  const budgetOverspend = Math.max(reportData.expenses - monthlyBudget, 0);
 
   // Calculate day-by-day consumption for the selected month
   const dailyConsumptionData = useMemo(() => {
@@ -246,13 +278,13 @@ const HomeScreen = () => {
       value: 0,
     }));
 
-    // Sum up only expenses (filter out income/salary) for each day
+    // Sum only expense categories for each day.
     allTransactions.forEach(item => {
       const itemDate = new Date(item.date);
       if (
         itemDate.getMonth() === targetMonth &&
         itemDate.getFullYear() === targetYear &&
-        !creditTransactionTypes.includes(item.type) // Exclude credits
+        expenseTransactionTypes.includes(item.type)
       ) {
         const dayIndex = itemDate.getDate() - 1;
         days[dayIndex].value += Number(item.amount) || 0;
@@ -336,6 +368,36 @@ const HomeScreen = () => {
     }
   };
 
+  const handleSaveBudget = async () => {
+    const amount = Number(budgetInput);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showMessage('Enter a budget greater than zero.', 'warning', 'Alert');
+      return;
+    }
+
+    try {
+      await saveMonthlyBudget(getMonthKey(selectedReportMonth), amount);
+      setMonthlyBudget(amount);
+      setBudgetVisible(false);
+      setBudgetInput('');
+      showMessage('Monthly spending budget saved.', 'success', 'Success');
+    } catch (error) {
+      console.log('Budget save error:', error);
+      showMessage('Unable to save this budget.', 'error', 'Oops!');
+    }
+  };
+
+  const handleClearBudget = async () => {
+    try {
+      await saveMonthlyBudget(getMonthKey(selectedReportMonth), 0);
+      setMonthlyBudget(0);
+      showMessage('Monthly budget removed.', 'success', 'Success');
+    } catch (error) {
+      console.log('Budget removal error:', error);
+      showMessage('Unable to remove this budget.', 'error', 'Oops!');
+    }
+  };
+
   const handleReset = async () => {
     if (resetPin !== '1009') {
       trigger('notificationError', notificationOptions);
@@ -355,12 +417,6 @@ const HomeScreen = () => {
       showMessage('Unable to clear entries.', 'error', 'Oops!');
     }
   };
-
-  const statItems = [
-    {label: 'Income', value: summary.income, bg: '#132238'},
-    {label: 'Expense', value: summary.expenses, bg: '#241C2D'},
-    {label: 'Savings', value: summary.savings, bg: '#162A26'},
-  ];
 
   const handleExport = async () => {
     try {
@@ -603,6 +659,174 @@ const HomeScreen = () => {
         </Animated.View>
 
         <Animated.View
+          entering={FadeInDown.delay(300).duration(500)}
+          style={styles.statsGrid}>
+          {statItems.map(item => (
+            <View
+              key={item.label}
+              style={[
+                styles.statCardGrid,
+                {
+                  backgroundColor: colors.surface,
+                  borderColor: colors.border,
+                  borderWidth: isDarkMode ? 0 : 1,
+                },
+              ]}>
+              <View style={styles.statLabelRow}>
+                <View
+                  style={[styles.statDot, {backgroundColor: item.color}]}
+                />
+                <Text style={[styles.statLabel, {color: colors.textMuted}]}>
+                  {item.label}
+                </Text>
+              </View>
+              <Text
+                numberOfLines={1}
+                adjustsFontSizeToFit
+                style={[styles.statValue, {color: colors.text}]}>
+                {formatCurrency(item.value)}
+              </Text>
+              <Text style={[styles.statPeriod, {color: colors.textMuted}]}>
+                {new Date(selectedReportMonth).toLocaleDateString('en-IN', {
+                  month: 'short',
+                  year: 'numeric',
+                })}
+              </Text>
+            </View>
+          ))}
+        </Animated.View>
+
+        <Animated.View
+          entering={FadeInDown.delay(350).duration(500)}
+          style={[
+            styles.budgetCard,
+            {
+              backgroundColor: colors.surface,
+              borderColor: colors.border,
+              borderWidth: isDarkMode ? 0 : 1,
+            },
+          ]}>
+          <View style={styles.budgetHeader}>
+            <View style={styles.budgetTitleGroup}>
+              <View
+                style={[
+                  styles.budgetIcon,
+                  {
+                    backgroundColor: isDarkMode
+                      ? 'rgba(34, 197, 94, 0.14)'
+                      : '#DCFCE7',
+                  },
+                ]}>
+                <Icon name="track-changes" size={20} color="#22C55E" />
+              </View>
+              <View>
+                <Text style={[styles.budgetTitle, {color: colors.text}]}>
+                  Monthly budget
+                </Text>
+                <Text style={[styles.budgetSubtitle, {color: colors.textMuted}]}>
+                  {new Date(selectedReportMonth).toLocaleDateString('en-IN', {
+                    month: 'long',
+                    year: 'numeric',
+                  })}
+                </Text>
+              </View>
+            </View>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={
+                monthlyBudget > 0 ? 'Edit monthly budget' : 'Set monthly budget'
+              }
+              style={[
+                styles.budgetAction,
+                {backgroundColor: colors.iconBackground},
+              ]}
+              onPress={() => {
+                setBudgetInput(monthlyBudget > 0 ? String(monthlyBudget) : '');
+                setBudgetVisible(true);
+              }}>
+              <Icon
+                name={monthlyBudget > 0 ? 'edit' : 'add'}
+                size={18}
+                color={colors.text}
+              />
+            </Pressable>
+          </View>
+          {monthlyBudget > 0 ? (
+            <>
+              <View style={styles.budgetAmountRow}>
+                <Text style={[styles.budgetSpent, {color: colors.text}]}>
+                  {formatCurrency(reportData.expenses)}
+                </Text>
+                <Text style={[styles.budgetLimit, {color: colors.textMuted}]}>
+                  of {formatCurrency(monthlyBudget)}
+                </Text>
+              </View>
+              <View
+                accessibilityRole="progressbar"
+                accessibilityValue={{
+                  min: 0,
+                  max: 100,
+                  now: Math.round(budgetProgress * 100),
+                }}
+                style={[
+                  styles.budgetTrack,
+                  {
+                    backgroundColor: isDarkMode ? '#1E293B' : '#E2E8F0',
+                  },
+                ]}>
+                <View
+                  style={[
+                    styles.budgetFill,
+                    {
+                      width: `${budgetProgress * 100}%`,
+                      backgroundColor:
+                        budgetProgress >= 1
+                          ? '#EF4444'
+                          : budgetProgress >= 0.8
+                          ? '#F59E0B'
+                          : '#22C55E',
+                    },
+                  ]}
+                />
+              </View>
+              <View style={styles.budgetFooter}>
+                <Text style={[styles.budgetSubtitle, {color: colors.textMuted}]}>
+                  {Math.round(budgetProgress * 100)}% used
+                </Text>
+                <Text
+                  style={[
+                    styles.budgetSubtitle,
+                    {
+                      color:
+                        budgetOverspend > 0
+                          ? '#EF4444'
+                          : colors.textMuted,
+                    },
+                  ]}>
+                  {budgetOverspend > 0
+                    ? `${formatCurrency(budgetOverspend)} over budget`
+                    : budgetRemaining > 0
+                    ? `${formatCurrency(budgetRemaining)} remaining`
+                    : 'Budget reached'}
+                </Text>
+              </View>
+              <Pressable
+                accessibilityRole="button"
+                onPress={handleClearBudget}
+                style={styles.clearBudgetButton}>
+                <Text style={[styles.clearBudgetText, {color: colors.textMuted}]}>
+                  Remove budget
+                </Text>
+              </Pressable>
+            </>
+          ) : (
+            <Text style={[styles.budgetEmpty, {color: colors.textMuted}]}>
+              Set a monthly limit to track spending and stay on plan.
+            </Text>
+          )}
+        </Animated.View>
+
+        <Animated.View
           entering={FadeInDown.delay(400).duration(500)}
           style={styles.sectionHeader}>
           <Text style={[styles.sectionTitle, {color: colors.text}]}>
@@ -705,44 +929,50 @@ const HomeScreen = () => {
                 value: reportData.categories[t.type] || 0,
                 color: t.accent,
               }))
-              .filter(t => t.value > 0)}
+              .filter(
+                t =>
+                  expenseTransactionTypes.includes(t.type) && t.value > 0,
+              )}
             total={reportData.totalAmount}
           />
           <View style={{marginTop: 16}}>
-            {transactionOptions.map(item => (
-              <View
-                key={item.type}
-                style={[
-                  styles.reportRow,
-                  {
-                    borderBottomColor: isDarkMode
-                      ? 'rgba(148, 163, 184, 0.12)'
-                      : 'rgba(15, 23, 42, 0.05)',
-                  },
-                ]}>
-                <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            {transactionOptions
+              .filter(item => expenseTransactionTypes.includes(item.type))
+              .map(item => (
+                <View
+                  key={item.type}
+                  style={[
+                    styles.reportRow,
+                    {
+                      borderBottomColor: isDarkMode
+                        ? 'rgba(148, 163, 184, 0.12)'
+                        : 'rgba(15, 23, 42, 0.05)',
+                    },
+                  ]}>
                   <View
-                    style={{
-                      width: 12,
-                      height: 12,
-                      borderRadius: 6,
-                      backgroundColor: item.accent,
-                      marginRight: 8,
-                    }}
-                  />
-                  <Text
-                    style={[
-                      styles.reportLabel,
-                      {color: isDarkMode ? '#CBD5E1' : '#475569'},
-                    ]}>
-                    {item.name}
+                    style={{flexDirection: 'row', alignItems: 'center'}}>
+                    <View
+                      style={{
+                        width: 12,
+                        height: 12,
+                        borderRadius: 6,
+                        backgroundColor: item.accent,
+                        marginRight: 8,
+                      }}
+                    />
+                    <Text
+                      style={[
+                        styles.reportLabel,
+                        {color: isDarkMode ? '#CBD5E1' : '#475569'},
+                      ]}>
+                      {item.name}
+                    </Text>
+                  </View>
+                  <Text style={[styles.reportValue, {color: colors.text}]}>
+                    {formatCurrency(reportData.categories[item.type])}
                   </Text>
                 </View>
-                <Text style={[styles.reportValue, {color: colors.text}]}>
-                  {formatCurrency(reportData.categories[item.type])}
-                </Text>
-              </View>
-            ))}
+              ))}
           </View>
         </Animated.View>
 
@@ -1142,6 +1372,72 @@ const HomeScreen = () => {
       </Modal>
 
       <Modal
+        visible={budgetVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setBudgetVisible(false)}>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          style={styles.modalOverlay}>
+          <View
+            style={[
+              styles.budgetModal,
+              {backgroundColor: colors.surface},
+            ]}>
+            <View style={styles.modalHeader}>
+              <Text style={[styles.modalTitleEnhanced, {color: colors.text}]}>
+                Set monthly budget
+              </Text>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Close budget form"
+                onPress={() => setBudgetVisible(false)}>
+                <Icon name="close" size={24} color={colors.textMuted} />
+              </Pressable>
+            </View>
+            <Text style={[styles.budgetModalHint, {color: colors.textMuted}]}>
+              Spending limit for{' '}
+              {new Date(selectedReportMonth).toLocaleDateString('en-IN', {
+                month: 'long',
+                year: 'numeric',
+              })}
+              .
+            </Text>
+            <View
+              style={[
+                styles.amountContainer,
+                {borderBottomColor: colors.border},
+              ]}>
+              <Text style={[styles.currencySign, {color: colors.text}]}>Rs</Text>
+              <TextInput
+                accessibilityLabel="Monthly spending limit"
+                value={budgetInput}
+                onChangeText={setBudgetInput}
+                keyboardType="decimal-pad"
+                placeholder="0"
+                placeholderTextColor={colors.textMuted}
+                style={[styles.amountInputEnhanced, {color: colors.text}]}
+              />
+            </View>
+            <Pressable
+              style={[
+                styles.modalPrimaryAction,
+                {backgroundColor: colors.buttonBackground},
+              ]}
+              onPress={handleSaveBudget}>
+              <Text
+                style={[
+                  styles.modalPrimaryTextEnhanced,
+                  {color: isDarkMode ? '#0B1220' : '#FFFFFF'},
+                ]}>
+                Save budget
+              </Text>
+            </Pressable>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
+
+      <Modal
         visible={resetVisible}
         transparent
         animationType="fade"
@@ -1373,24 +1669,125 @@ const styles = StyleSheet.create({
   },
   statsGrid: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
     justifyContent: 'space-between',
-    marginBottom: 22,
-    gap: 12,
+    marginBottom: 16,
   },
   statCardGrid: {
-    borderRadius: 20,
-    padding: 16,
+    width: '31.5%',
+    borderRadius: 18,
+    padding: 12,
+    borderWidth: 1,
+  },
+  statLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  statDot: {
+    width: 7,
+    height: 7,
+    borderRadius: 4,
+    marginRight: 6,
   },
   statLabel: {
-    color: '#CBD5E1',
-    fontSize: 12,
-    marginBottom: 8,
+    fontSize: 11,
+    fontWeight: '600',
   },
   statValue: {
-    color: '#FFFFFF',
-    fontSize: 18,
+    fontSize: 14,
     fontWeight: '800',
+  },
+  statPeriod: {
+    fontSize: 10,
+    marginTop: 5,
+  },
+  budgetCard: {
+    borderRadius: 22,
+    padding: 18,
+    marginBottom: 24,
+  },
+  budgetHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 18,
+  },
+  budgetTitleGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  budgetIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  budgetTitle: {
+    fontSize: 15,
+    fontWeight: '800',
+    marginBottom: 3,
+  },
+  budgetSubtitle: {
+    fontSize: 12,
+  },
+  budgetAction: {
+    width: 38,
+    height: 38,
+    borderRadius: 13,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  budgetAmountRow: {
+    flexDirection: 'row',
+    alignItems: 'baseline',
+    marginBottom: 12,
+  },
+  budgetSpent: {
+    fontSize: 23,
+    fontWeight: '800',
+    marginRight: 6,
+  },
+  budgetLimit: {
+    fontSize: 13,
+  },
+  budgetTrack: {
+    height: 9,
+    borderRadius: 6,
+    overflow: 'hidden',
+  },
+  budgetFill: {
+    height: '100%',
+    borderRadius: 6,
+  },
+  budgetFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 9,
+  },
+  budgetEmpty: {
+    fontSize: 13,
+    lineHeight: 20,
+  },
+  clearBudgetButton: {
+    alignSelf: 'flex-end',
+    marginTop: 12,
+    paddingVertical: 4,
+  },
+  clearBudgetText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  budgetModal: {
+    borderRadius: 28,
+    padding: 24,
+  },
+  budgetModalHint: {
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: -12,
+    marginBottom: 14,
   },
   sectionHeader: {
     marginBottom: 12,

@@ -24,8 +24,8 @@ const executeSql = (query, params = []) =>
         });
     });
 
-const createTable = () =>
-    executeSql(
+const createTables = async () => {
+    await executeSql(
         `CREATE TABLE IF NOT EXISTS transactions (
             id INTEGER PRIMARY KEY NOT NULL,
             amount REAL NOT NULL,
@@ -33,11 +33,22 @@ const createTable = () =>
             type TEXT NOT NULL
         );`,
     );
+    await executeSql(
+        `CREATE TABLE IF NOT EXISTS monthly_budgets (
+            month TEXT PRIMARY KEY NOT NULL,
+            amount REAL NOT NULL
+        );`,
+    );
+};
+
+const databaseReady = createTables();
+databaseReady.catch(error => console.log('Create table error:', error));
 
 const incomeTypes = ['income', 'salary'];
 const expenseTypes = ['petrol', 'food', 'other'];
 
 const getDashboardSummary = async () => {
+    await databaseReady;
     const result = await executeSql(
         `SELECT
             COALESCE(SUM(CASE WHEN type IN ('income', 'salary') THEN amount ELSE 0 END), 0) AS income,
@@ -57,6 +68,7 @@ const getTransactions = async ({
     endDate = null,
     limit = null,
 } = {}) => {
+    await databaseReady;
     let query = 'SELECT * FROM transactions WHERE 1 = 1';
     const params = [];
 
@@ -86,17 +98,55 @@ const getTransactions = async ({
     return result.rows.raw();
 };
 
-const addTransaction = async ({ amount, type, date = new Date().toISOString() }) =>
-    executeSql(
+const addTransaction = async ({ amount, type, date = new Date().toISOString() }) => {
+    await databaseReady;
+    return executeSql(
         'INSERT INTO transactions (amount, date, type) VALUES (?, ?, ?)',
         [amount, date, type],
     );
+};
 
-const clearTransactions = async () =>
-    executeSql('DELETE FROM transactions');
+const updateTransaction = async ({ id, amount, type, date }) => {
+    await databaseReady;
+    return executeSql(
+        'UPDATE transactions SET amount = ?, date = ?, type = ? WHERE id = ?',
+        [amount, date, type, id],
+    );
+};
 
-const closeDatabase = () =>
-    new Promise((resolve, reject) => {
+const deleteTransaction = async id => {
+    await databaseReady;
+    return executeSql('DELETE FROM transactions WHERE id = ?', [id]);
+};
+
+const getMonthlyBudget = async month => {
+    await databaseReady;
+    const result = await executeSql(
+        'SELECT amount FROM monthly_budgets WHERE month = ?',
+        [month],
+    );
+    return result.rows.length ? Number(result.rows.item(0).amount) : 0;
+};
+
+const setMonthlyBudget = async (month, amount) => {
+    await databaseReady;
+    if (amount === 0) {
+        return executeSql('DELETE FROM monthly_budgets WHERE month = ?', [month]);
+    }
+    return executeSql(
+        'INSERT OR REPLACE INTO monthly_budgets (month, amount) VALUES (?, ?)',
+        [month, amount],
+    );
+};
+
+const clearTransactions = async () => {
+    await databaseReady;
+    return executeSql('DELETE FROM transactions');
+};
+
+const closeDatabase = async () => {
+    await databaseReady;
+    return new Promise((resolve, reject) => {
         db.close(
             () => {
                 console.log('Database closed');
@@ -108,9 +158,20 @@ const closeDatabase = () =>
             },
         );
     });
+};
 
-createTable().catch(error => console.log('Create table error:', error));
-
-export { addTransaction, clearTransactions, closeDatabase, expenseTypes, getDashboardSummary, getTransactions, incomeTypes };
+export {
+    addTransaction,
+    clearTransactions,
+    closeDatabase,
+    deleteTransaction,
+    expenseTypes,
+    getDashboardSummary,
+    getMonthlyBudget,
+    getTransactions,
+    incomeTypes,
+    setMonthlyBudget,
+    updateTransaction,
+};
 
 export default db;
